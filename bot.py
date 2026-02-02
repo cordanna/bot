@@ -8,7 +8,7 @@ from aiogram.enums import ChatType
 
 # ================== НАСТРОЙКИ ==================
 
-TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"
+TOKEN = "8585669142:AAEgCDQi2a52Ksy2HXl27NXhAcuDuiGNaZk"
 
 # ================== БАЗА ДАННЫХ ==================
 
