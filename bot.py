@@ -1,14 +1,20 @@
 import asyncio
+import os
 import re
 import sqlite3
 from datetime import date, timedelta
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ChatType
+from aiohttp import web
 
 # ================== НАСТРОЙКИ ==================
 
-TOKEN = "8585669142:AAEgCDQi2a52Ksy2HXl27NXhAcuDuiGNaZk"
+TOKEN = os.getenv("BOT_TOKEN")  # ← ТОКЕН ИЗ Render ENV
+PORT = int(os.getenv("PORT", 10000))
+
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN not set")
 
 # ================== БАЗА ДАННЫХ ==================
 
@@ -55,7 +61,6 @@ def period_start(days: int) -> str:
 async def handle_message(message: types.Message):
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
-
     if not message.text:
         return
 
@@ -67,12 +72,12 @@ async def handle_message(message: types.Message):
     username = user.first_name
     today = date.today().isoformat()
 
-    # ---------- АЛЕРТ ----------
+    # ---- АЛЕРТ ----
     if text_l == "алерт":
         await send_alert(message)
         return
 
-    # ---------- ИТОГИ ----------
+    # ---- ИТОГИ ----
     if text_l == "итоги":
         await send_personal_totals(message, user_id, username, today)
         return
@@ -107,7 +112,7 @@ async def handle_message(message: types.Message):
         )
         return
 
-    # ---------- НОРМА ----------
+    # ---- НОРМА ----
     norm_match = NORM_PATTERN.match(text)
     if norm_match:
         habit, target = norm_match.groups()
@@ -125,7 +130,7 @@ async def handle_message(message: types.Message):
         await message.reply(f"{username} — норма для «{habit}»: {target}")
         return
 
-    # ---------- ЛОГ ----------
+    # ---- ЛОГ ----
     log_match = LOG_PATTERN.match(text)
     if not log_match:
         return
@@ -154,18 +159,16 @@ async def handle_message(message: types.Message):
     """, (user_id, habit))
     row = cursor.fetchone()
 
+    suffix = ""
     if row:
-        target = row[0]
-        percent = min(100, int(total / target * 100))
+        percent = min(100, int(total / row[0] * 100))
         suffix = f" — {percent}% от нормы"
-    else:
-        suffix = ""
 
-    await message.reply(
-        f"{username} — {habit} {value:+d} (итого {total} сегодня){suffix}"
+    await message.reply(f"{username} — {habit} {value:+d} (итого {total} сегодня){suffix}"
     )
 
-# ================== ИТОГИ ==================
+# ================== ИТОГИ / АЛЕРТ ==================
+
 async def send_personal_totals(message, user_id, username, today):
     cursor.execute("""
         SELECT habit, SUM(value)
@@ -179,7 +182,7 @@ async def send_personal_totals(message, user_id, username, today):
         await message.reply("Сегодня пока нет записей")
         return
 
-    lines = [f"Итоги за сегодня — {username}:"]
+    lines = [f"Итоги — {username}:"]
     for habit, total in rows:
         cursor.execute("""
             SELECT target FROM norms
@@ -187,9 +190,8 @@ async def send_personal_totals(message, user_id, username, today):
         """, (user_id, habit))
         row = cursor.fetchone()
         if row:
-            target = row[0]
-            percent = min(100, int(total / target * 100))
-            lines.append(f"• {habit}: {total}/{target} ({percent}%)")
+            percent = min(100, int(total / row[0] * 100))
+            lines.append(f"• {habit}: {total}/{row[0]} ({percent}%)")
         else:
             lines.append(f"• {habit}: {total}")
 
@@ -237,7 +239,6 @@ async def send_group_totals(message, today):
         GROUP BY user_id, habit
         ORDER BY username
     """, (today,))
-
     rows = cursor.fetchall()
     if not rows:
         await message.reply("Сегодня пока нет записей")
@@ -247,7 +248,7 @@ async def send_group_totals(message, today):
     for username, habit, total in rows:
         data.setdefault(username, []).append((habit, total))
 
-    lines = ["Итоги за сегодня — все:"]
+    lines = ["Итоги — все:"]
     for username, habits in data.items():
         lines.append(f"\n{username}:")
         for habit, total in habits:
@@ -264,7 +265,6 @@ async def send_group_period_totals(message, start, end, title):
         GROUP BY user_id, habit
         ORDER BY username
     """, (start, end))
-
     rows = cursor.fetchall()
     if not rows:
         await message.reply(f"{title}: данных нет")
@@ -282,28 +282,18 @@ async def send_group_period_totals(message, start, end, title):
 
     await message.reply("\n".join(lines))
 
-# ================== АЛЕРТ ==================
 
 async def send_alert(message):
     today = date.today().isoformat()
-
-    cursor.execute("""
-        SELECT DISTINCT user_id, username
-        FROM logs
-    """)
+    cursor.execute("SELECT DISTINCT user_id, username FROM logs")
     users = cursor.fetchall()
 
     lines = ["Алерт за сегодня:"]
     has_alerts = False
 
     for user_id, username in users:
-        cursor.execute("""
-            SELECT habit, target
-            FROM norms
-            WHERE user_id = ?
-        """, (user_id,))
+        cursor.execute("SELECT habit, target FROM norms WHERE user_id = ?", (user_id,))
         norms_rows = cursor.fetchall()
-
         if not norms_rows:
             continue
 
@@ -312,11 +302,8 @@ async def send_alert(message):
             cursor.execute("""
                 SELECT SUM(value)
                 FROM logs
-                WHERE user_id = ?
-                AND habit = ?
-                  AND log_date = ?
-            """, (user_id, habit, today))
-
+                WHERE user_id = ? AND habit = ? AND log_date = ?
+                """, (user_id, habit, today))
             total = cursor.fetchone()[0] or 0
 
             if total < target:
@@ -325,9 +312,8 @@ async def send_alert(message):
             else:
                 user_lines.append(f"• {habit}: {total}/{target} ✅")
 
-        if user_lines:
-            lines.append(f"\n{username}:")
-            lines.extend(user_lines)
+        lines.append(f"\n{username}:")
+        lines.extend(user_lines)
 
     if not has_alerts:
         await message.reply("Алерт: все уложились в нормы ✅")
@@ -335,9 +321,23 @@ async def send_alert(message):
 
     await message.reply("\n".join(lines))
 
+# ================== FAKE HTTP ==================
+
+async def healthcheck(request):
+    return web.Response(text="OK")
+
+async def start_http_server():
+    app = web.Application()
+    app.router.add_get("/", healthcheck)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
 # ================== ЗАПУСК ==================
 
 async def main():
+    await start_http_server()
     await dp.start_polling(bot)
 
 if name == "__main__":
